@@ -5,7 +5,13 @@ import Channel from "./model/ChannelModel.js";
 const setupSocket = (server) => {
   const io = new SocketIOServer(server, {
     cors: {
-      origin: ["http://localhost:5173", "http://localhost:5174"],
+      origin: [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "https://chat-frontend-red-delta.vercel.app",
+        "https://www.chat-frontend-red-delta.vercel.app",
+        "https://chat-backend-wly0.onrender.com",
+      ],
       methods: ["GET", "POST"],
       credentials: true,
     },
