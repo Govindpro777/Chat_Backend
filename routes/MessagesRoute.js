@@ -1,5 +1,9 @@
 import { Router } from "express";
-import { getMessages, uploadFile } from "../controllers/MessagesController.js";
+import {
+  deleteFileMessage,
+  getMessages,
+  uploadFile,
+} from "../controllers/MessagesController.js";
 import { verifyToken } from "../middlewares/AuthMiddleware.js";
 import multer from "multer";
 
@@ -12,5 +16,7 @@ messagesRoutes.post(
   upload.single("file"),
   uploadFile
 );
+
+messagesRoutes.delete("/delete-file/:messageId", verifyToken, deleteFileMessage);
 
 export default messagesRoutes;

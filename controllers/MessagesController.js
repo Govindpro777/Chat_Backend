@@ -1,5 +1,9 @@
 import Message from "../model/MessagesModel.js";
-import { mkdirSync, renameSync } from "fs";
+import { mkdirSync, renameSync, unlinkSync, rmdirSync, existsSync } from "fs";
+import path from "path";
+import Channel from "../model/ChannelModel.js";
+
+const FILES_ROOT = path.resolve("uploads/files");
 
 export const getMessages = async (req, res, next) => {
   try {
@@ -42,5 +46,60 @@ export const uploadFile = async (request, response, next) => {
   } catch (error) {
     console.log({ error });
     return response.status(500).send("Internal Server Error.");
+  }
+};
+
+// Deletes an attachment message and its file from the server (sender only)
+export const deleteFileMessage = async (req, res, next) => {
+  try {
+    const message = await Message.findById(req.params.messageId);
+    if (!message) return res.status(404).send("Message not found.");
+    if (message.messageType !== "file") {
+      return res.status(400).send("Only attachments can be deleted.");
+    }
+    if (message.sender.toString() !== req.userId) {
+      return res.status(403).send("You can only delete your own attachments.");
+    }
+
+    // Resolve inside the uploads folder so a stored path can never escape it
+    const filePath = path.resolve(message.fileUrl);
+    if (filePath.startsWith(FILES_ROOT + path.sep) && existsSync(filePath)) {
+      unlinkSync(filePath);
+      try {
+        rmdirSync(path.dirname(filePath)); // remove the timestamp folder if empty
+      } catch {
+        // folder not empty, leave it
+      }
+    }
+
+    // Work out who needs to know before the message is removed
+    const recipients = new Set([message.sender.toString()]);
+    let channelId = null;
+    if (message.recipient) {
+      recipients.add(message.recipient.toString());
+    } else {
+      const channel = await Channel.findOne({ messages: message._id });
+      if (channel) {
+        channelId = channel._id.toString();
+        channel.members.forEach((m) => recipients.add(m.toString()));
+        recipients.add(channel.admin.toString());
+        await Channel.updateOne(
+          { _id: channel._id },
+          { $pull: { messages: message._id } }
+        );
+      }
+    }
+
+    await Message.deleteOne({ _id: message._id });
+
+    req.app.get("notifyUsers")?.([...recipients], "message-deleted", {
+      messageId: message._id.toString(),
+      channelId,
+    });
+
+    return res.status(200).json({ messageId: message._id });
+  } catch (error) {
+    console.log({ error });
+    return res.status(500).send("Internal Server Error.");
   }
 };

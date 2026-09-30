@@ -3,7 +3,7 @@ import Message from "./model/MessagesModel.js";
 import Channel from "./model/ChannelModel.js";
 import { sendPushToUser } from "./lib/push.js";
 
-const setupSocket = (server) => {
+const setupSocket = (server, app) => {
   const io = new SocketIOServer(server, {
     cors: {
       origin: [
@@ -19,6 +19,14 @@ const setupSocket = (server) => {
   });
 
   const userSocketMap = new Map();
+
+  // Lets HTTP controllers push socket events to specific users
+  app?.set("notifyUsers", (userIds, event, payload) => {
+    userIds.forEach((id) => {
+      const socketId = userSocketMap.get(id);
+      if (socketId) io.to(socketId).emit(event, payload);
+    });
+  });
 
   const addChannelNotify = async (channel) => {
     if (channel && channel.members) {

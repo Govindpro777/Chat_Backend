@@ -46,7 +46,7 @@ const server = app.listen(port, () => {
   console.log(`Server is running at http://localhost:${port}`);
 });
 
-setupSocket(server);
+setupSocket(server, app);
 
 // Testing the server
 app.get("/", (req, res) => {
