@@ -16,13 +16,15 @@ export const signup = async (req, res, next) => {
     const { email, password } = req.body;
     if (email && password) {
       const user = await User.create({ email, password });
-      res.cookie("jwt", createToken(email, user.id), {
+      const token = createToken(email, user.id);
+      res.cookie("jwt", token, {
         maxAge,
         secure: true,
         sameSite: "None",
       });
 
       return res.status(201).json({
+        token,
         user: {
           id: user?.id,
           email: user?.email,
@@ -53,12 +55,14 @@ export const login = async (req, res, next) => {
       if (!auth) {
         return res.status(400).send("Invalid Password");
       }
-      res.cookie("jwt", createToken(email, user.id), {
+      const token = createToken(email, user.id);
+      res.cookie("jwt", token, {
         maxAge,
         secure: true,
         sameSite: "None",
       });
       return res.status(200).json({
+        token,
         user: {
           id: user?.id,
           email: user?.email,
