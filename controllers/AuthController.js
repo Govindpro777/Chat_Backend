@@ -18,6 +18,8 @@ export const signup = async (req, res, next) => {
       const user = await User.create({ email, password });
       res.cookie("jwt", createToken(email, user.id), {
         maxAge,
+        secure: true,
+        sameSite: "None",
       });
 
       return res.status(201).json({
@@ -53,6 +55,8 @@ export const login = async (req, res, next) => {
       }
       res.cookie("jwt", createToken(email, user.id), {
         maxAge,
+        secure: true,
+        sameSite: "None",
       });
       return res.status(200).json({
         user: {
@@ -100,7 +104,7 @@ export const getUserInfo = async (request, response, next) => {
 
 export const logout = async (request, response, next) => {
   try {
-    response.cookie("jwt", "", { maxAge: 1,});
+    response.cookie("jwt", "", { maxAge: 1, secure: true, sameSite: "None" });
     return response.status(200).send("Logout successful");
   } catch (err) {
     return response.status(500).send("Internal Server Error");
