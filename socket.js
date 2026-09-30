@@ -93,6 +93,10 @@ const setupSocket = (server) => {
     }
   };
 
+  const broadcastOnlineUsers = () => {
+    io.emit("online-users", Array.from(userSocketMap.keys()));
+  };
+
   const disconnect = (socket) => {
     console.log("Client disconnected", socket.id);
     for (const [userId, socketId] of userSocketMap.entries()) {
@@ -101,6 +105,7 @@ const setupSocket = (server) => {
         break;
       }
     }
+    broadcastOnlineUsers();
   };
 
   io.on("connection", (socket) => {
@@ -109,6 +114,7 @@ const setupSocket = (server) => {
     if (userId) {
       userSocketMap.set(userId, socket.id);
       console.log(`User connected: ${userId} with socket ID: ${socket.id}`);
+      broadcastOnlineUsers();
     } else {
       console.log("User ID not provided during connection.");
     }
