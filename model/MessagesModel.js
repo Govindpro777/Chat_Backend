@@ -38,6 +38,19 @@ const messageSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  clientId: {
+    type: String,
+  },
+  reactions: {
+    type: [
+      {
+        user: { type: mongoose.Schema.Types.ObjectId, ref: "Users", required: true },
+        emoji: { type: String, required: true },
+        _id: false,
+      },
+    ],
+    default: [],
+  },
   seen: {
     type: Boolean,
     default: false,
@@ -47,6 +60,13 @@ const messageSchema = new mongoose.Schema({
     default: null,
   },
 });
+
+// Makes retried sends idempotent: one message per (sender, clientId)
+messageSchema.index(
+  { sender: 1, clientId: 1 },
+  { unique: true, partialFilterExpression: { clientId: { $type: "string" } } }
+);
+messageSchema.index({ sender: 1, recipient: 1, timestamp: -1 });
 
 const Message = mongoose.model("Messages", messageSchema);
 export default Message;

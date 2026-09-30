@@ -45,91 +45,190 @@ const setupSocket = (server, app) => {
   const pushBody = (message) =>
     message.messageType === "file" ? "Sent a file" : message.content;
 
-  const sendMessage = async (message) => {
-    const recipientSocketId = userSocketMap.get(message.recipient);
-    const senderSocketId = userSocketMap.get(message.sender);
-
-    // Create the message
-    const createdMessage = await Message.create(message);
-
-    // Find the created message by its ID and populate sender and recipient details
-    const messageData = await Message.findById(createdMessage._id)
-      .populate("sender", "id email firstName lastName image color")
-      .populate("recipient", "id email firstName lastName image color")
-      .exec();
-
-    if (recipientSocketId) {
-      io.to(recipientSocketId).emit("receiveMessage", messageData);
+  // Retried sends carry the same clientId, so they never create a second message
+  const createMessageOnce = async (data) => {
+    const find = () =>
+      Message.findOne({ sender: data.sender, clientId: data.clientId });
+    if (data.clientId) {
+      const existing = await find();
+      if (existing) return { doc: existing, duplicate: true };
     }
-
-    // Optionally, send the message back to the sender (e.g., for message confirmation)
-    if (senderSocketId) {
-      io.to(senderSocketId).emit("receiveMessage", messageData);
+    try {
+      return { doc: await Message.create(data), duplicate: false };
+    } catch (err) {
+      if (err.code === 11000 && data.clientId) {
+        const existing = await find();
+        if (existing) return { doc: existing, duplicate: true };
+      }
+      throw err;
     }
-
-    // Background/closed-app notification; failures must not affect delivery
-    sendPushToUser(messageData.recipient._id.toString(), {
-      chatId: messageData.sender._id.toString(),
-      title: senderName(messageData.sender),
-      body: pushBody(messageData),
-      url: `/chat/contact/${messageData.sender._id}`,
-      icon: messageData.sender.image,
-    }).catch((err) => console.log("Push error", err.message));
   };
 
-  const sendChannelMessage = async (message) => {
-    const { channelId, sender, content, messageType, fileUrl } = message;
+  const sendMessage = async (userId, message, ack) => {
+    const reply = (payload) => typeof ack === "function" && ack(payload);
+    try {
+      if (!userId || !message?.recipient) return reply({ ok: false });
 
-    // Create and save the message
-    const createdMessage = await Message.create({
-      sender,
-      recipient: null, // Channel messages don't have a single recipient
-      content,
-      messageType,
-      timestamp: new Date(),
-      fileUrl,
-    });
-
-    const messageData = await Message.findById(createdMessage._id)
-      .populate("sender", "id email firstName lastName image color")
-      .exec();
-
-    // Add message to the channel
-    await Channel.findByIdAndUpdate(channelId, {
-      $push: { messages: createdMessage._id },
-    });
-
-    // Fetch all members of the channel
-    const channel = await Channel.findById(channelId).populate("members");
-
-    const finalData = { ...messageData._doc, channelId: channel._id };
-    if (channel && channel.members) {
-      channel.members.forEach((member) => {
-        const memberSocketId = userSocketMap.get(member._id.toString());
-        if (memberSocketId) {
-          io.to(memberSocketId).emit("recieve-channel-message", finalData);
-        }
+      const { doc, duplicate } = await createMessageOnce({
+        sender: userId,
+        recipient: message.recipient,
+        content: message.content,
+        messageType: message.messageType,
+        audioUrl: message.audioUrl,
+        fileUrl: message.fileUrl,
+        clientId: message.clientId,
       });
-      const adminSocketId = userSocketMap.get(channel.admin._id.toString());
-      if (adminSocketId) {
-        io.to(adminSocketId).emit("recieve-channel-message", finalData);
+
+      const messageData = await Message.findById(doc._id)
+        .populate("sender", "id email firstName lastName image color")
+        .populate("recipient", "id email firstName lastName image color")
+        .exec();
+
+      const recipientSocketId = userSocketMap.get(String(message.recipient));
+      const senderSocketId = userSocketMap.get(userId);
+
+      // A retry only needs to confirm delivery to the sender again
+      if (!duplicate && recipientSocketId) {
+        io.to(recipientSocketId).emit("receiveMessage", messageData);
+      }
+      if (senderSocketId) {
+        io.to(senderSocketId).emit("receiveMessage", messageData);
       }
 
-      const senderId = messageData.sender._id.toString();
-      const recipientIds = new Set(
-        [...channel.members, channel.admin].map((u) => u._id.toString())
-      );
-      recipientIds.delete(senderId);
-      recipientIds.forEach((id) => {
-        sendPushToUser(id, {
-          chatId: channel._id.toString(),
-          title: `#${channel.name}`,
-          body: `${senderName(messageData.sender)}: ${pushBody(messageData)}`,
-          url: `/chat/channel/${channel._id}`,
+      reply({ ok: true });
+
+      if (!duplicate) {
+        // Background/closed-app notification; failures must not affect delivery
+        sendPushToUser(messageData.recipient._id.toString(), {
+          chatId: messageData.sender._id.toString(),
+          title: senderName(messageData.sender),
+          body: pushBody(messageData),
+          url: `/chat/contact/${messageData.sender._id}`,
           icon: messageData.sender.image,
         }).catch((err) => console.log("Push error", err.message));
-      });
+      }
+    } catch (error) {
+      console.log("sendMessage failed", error.message);
+      reply({ ok: false });
     }
+  };
+
+  const sendChannelMessage = async (userId, message, ack) => {
+    const reply = (payload) => typeof ack === "function" && ack(payload);
+    try {
+      const { channelId, content, messageType, fileUrl, clientId } = message || {};
+      if (!userId || !channelId) return reply({ ok: false });
+
+      const channel = await Channel.findById(channelId).populate("members");
+      if (!channel) return reply({ ok: false });
+      const participantIds = [...channel.members, channel.admin].map((u) =>
+        (u._id || u).toString()
+      );
+      if (!participantIds.includes(userId)) return reply({ ok: false });
+
+      const { doc, duplicate } = await createMessageOnce({
+        sender: userId,
+        recipient: null, // Channel messages don't have a single recipient
+        content,
+        messageType,
+        timestamp: new Date(),
+        fileUrl,
+        clientId,
+      });
+
+      const messageData = await Message.findById(doc._id)
+        .populate("sender", "id email firstName lastName image color")
+        .exec();
+      const finalData = { ...messageData._doc, channelId: channel._id };
+
+      if (duplicate) {
+        const senderSocketId = userSocketMap.get(userId);
+        if (senderSocketId) {
+          io.to(senderSocketId).emit("recieve-channel-message", finalData);
+        }
+        return reply({ ok: true });
+      }
+
+      await Channel.findByIdAndUpdate(channelId, {
+        $push: { messages: doc._id },
+      });
+
+      participantIds.forEach((id) => {
+        const socketId = userSocketMap.get(id);
+        if (socketId) {
+          io.to(socketId).emit("recieve-channel-message", finalData);
+        }
+      });
+
+      reply({ ok: true });
+
+      const senderId = messageData.sender._id.toString();
+      participantIds
+        .filter((id) => id !== senderId)
+        .forEach((id) => {
+          sendPushToUser(id, {
+            chatId: channel._id.toString(),
+            title: `#${channel.name}`,
+            body: `${senderName(messageData.sender)}: ${pushBody(messageData)}`,
+            url: `/chat/channel/${channel._id}`,
+            icon: messageData.sender.image,
+          }).catch((err) => console.log("Push error", err.message));
+        });
+    } catch (error) {
+      console.log("sendChannelMessage failed", error.message);
+      reply({ ok: false });
+    }
+  };
+
+  // One reaction per user; sending the same emoji again removes it
+  const reactToMessage = async (userId, payload) => {
+    const { messageId, emoji } = payload || {};
+    if (!userId || !messageId || typeof emoji !== "string") return;
+    if (!emoji || emoji.length > 8) return;
+
+    const message = await Message.findById(messageId);
+    if (!message) return;
+
+    let participantIds;
+    let channelId = null;
+    if (message.recipient) {
+      participantIds = [message.sender.toString(), message.recipient.toString()];
+    } else {
+      const channel = await Channel.findOne({ messages: message._id });
+      if (!channel) return;
+      participantIds = [...channel.members, channel.admin].map((u) =>
+        u.toString()
+      );
+      channelId = channel._id.toString();
+    }
+    if (!participantIds.includes(userId)) return;
+
+    const existing = message.reactions.find((r) => r.user.toString() === userId);
+    if (existing && existing.emoji === emoji) {
+      message.reactions = message.reactions.filter(
+        (r) => r.user.toString() !== userId
+      );
+    } else if (existing) {
+      existing.emoji = emoji;
+    } else {
+      message.reactions.push({ user: userId, emoji });
+    }
+    await message.save();
+
+    const reactions = message.reactions.map((r) => ({
+      user: r.user.toString(),
+      emoji: r.emoji,
+    }));
+    participantIds.forEach((id) => {
+      const socketId = userSocketMap.get(id);
+      if (socketId) {
+        io.to(socketId).emit("message-reaction", {
+          messageId,
+          channelId,
+          reactions,
+        });
+      }
+    });
   };
 
   // Viewer has opened the chat with chatUserId: mark that user's messages as seen
@@ -176,7 +275,9 @@ const setupSocket = (server, app) => {
 
     socket.on("add-channel-notify", addChannelNotify);
 
-    socket.on("sendMessage", sendMessage);
+    socket.on("sendMessage", (message, ack) =>
+      sendMessage(userId, message, ack)
+    );
 
     // Relay typing state to the other person in a direct chat
     socket.on("typing", ({ to, isTyping } = {}) => {
@@ -190,7 +291,15 @@ const setupSocket = (server, app) => {
       markMessagesSeen(userId, chatUserId).catch((err) => console.log(err));
     });
 
-    socket.on("send-channel-message", sendChannelMessage);
+    socket.on("send-channel-message", (message, ack) =>
+      sendChannelMessage(userId, message, ack)
+    );
+
+    socket.on("react-message", (payload) => {
+      reactToMessage(userId, payload).catch((err) =>
+        console.log("react failed", err.message)
+      );
+    });
 
     socket.on("disconnect", () => disconnect(socket));
   });

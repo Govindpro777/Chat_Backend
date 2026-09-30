@@ -103,3 +103,73 @@ export const deleteFileMessage = async (req, res, next) => {
     return res.status(500).send("Internal Server Error.");
   }
 };
+
+const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Search the text messages the user can see: their direct chats and their channels
+export const searchMessages = async (req, res, next) => {
+  try {
+    const query = String(req.body.query || "").trim();
+    if (query.length < 2) return res.status(200).json({ results: [] });
+
+    const userId = req.userId;
+    const regex = new RegExp(escapeRegex(query), "i");
+    const fields = "firstName lastName email image color";
+
+    const channels = await Channel.find({
+      $or: [{ admin: userId }, { members: userId }],
+    }).select("name messages");
+    const channelByMessage = new Map();
+    channels.forEach((channel) =>
+      channel.messages.forEach((id) => channelByMessage.set(id.toString(), channel))
+    );
+
+    const messages = await Message.find({
+      messageType: "text",
+      content: regex,
+      $or: [
+        { sender: userId },
+        { recipient: userId },
+        { _id: { $in: [...channelByMessage.keys()] } },
+      ],
+    })
+      .sort({ timestamp: -1 })
+      .limit(40)
+      .populate("sender", fields)
+      .populate("recipient", fields);
+
+    const results = messages
+      .map((message) => {
+        const channel = channelByMessage.get(message._id.toString());
+        if (channel) {
+          return {
+            _id: message._id,
+            content: message.content,
+            timestamp: message.timestamp,
+            type: "channel",
+            chat: { _id: channel._id, name: channel.name },
+            sender: message.sender,
+          };
+        }
+        if (!message.recipient) return null;
+        const other =
+          message.sender._id.toString() === userId
+            ? message.recipient
+            : message.sender;
+        return {
+          _id: message._id,
+          content: message.content,
+          timestamp: message.timestamp,
+          type: "contact",
+          chat: other,
+          sender: message.sender,
+        };
+      })
+      .filter(Boolean);
+
+    return res.status(200).json({ results });
+  } catch (error) {
+    console.log({ error });
+    return res.status(500).send("Internal Server Error");
+  }
+};

@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   deleteFileMessage,
   getMessages,
+  searchMessages,
   uploadFile,
 } from "../controllers/MessagesController.js";
 import { verifyToken } from "../middlewares/AuthMiddleware.js";
@@ -18,5 +19,7 @@ messagesRoutes.post(
 );
 
 messagesRoutes.delete("/delete-file/:messageId", verifyToken, deleteFileMessage);
+
+messagesRoutes.post("/search", verifyToken, searchMessages);
 
 export default messagesRoutes;
