@@ -93,6 +93,22 @@ const setupSocket = (server) => {
     }
   };
 
+  // Viewer has opened the chat with chatUserId: mark that user's messages as seen
+  const markMessagesSeen = async (viewerId, chatUserId) => {
+    if (!viewerId || !chatUserId) return;
+    const seenAt = new Date();
+    const result = await Message.updateMany(
+      { sender: chatUserId, recipient: viewerId, seen: false },
+      { $set: { seen: true, seenAt } }
+    );
+    if (result.modifiedCount > 0) {
+      const senderSocketId = userSocketMap.get(chatUserId);
+      if (senderSocketId) {
+        io.to(senderSocketId).emit("messages-seen", { by: viewerId, seenAt });
+      }
+    }
+  };
+
   const broadcastOnlineUsers = () => {
     io.emit("online-users", Array.from(userSocketMap.keys()));
   };
@@ -122,6 +138,10 @@ const setupSocket = (server) => {
     socket.on("add-channel-notify", addChannelNotify);
 
     socket.on("sendMessage", sendMessage);
+
+    socket.on("mark-seen", ({ chatUserId } = {}) => {
+      markMessagesSeen(userId, chatUserId).catch((err) => console.log(err));
+    });
 
     socket.on("send-channel-message", sendChannelMessage);
 

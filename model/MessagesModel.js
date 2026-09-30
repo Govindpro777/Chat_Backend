@@ -38,6 +38,14 @@ const messageSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  seen: {
+    type: Boolean,
+    default: false,
+  },
+  seenAt: {
+    type: Date,
+    default: null,
+  },
 });
 
 const Message = mongoose.model("Messages", messageSchema);
