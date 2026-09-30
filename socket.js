@@ -170,6 +170,14 @@ const setupSocket = (server) => {
 
     socket.on("sendMessage", sendMessage);
 
+    // Relay typing state to the other person in a direct chat
+    socket.on("typing", ({ to, isTyping } = {}) => {
+      const recipientSocketId = userSocketMap.get(to);
+      if (userId && recipientSocketId) {
+        io.to(recipientSocketId).emit("typing", { from: userId, isTyping });
+      }
+    });
+
     socket.on("mark-seen", ({ chatUserId } = {}) => {
       markMessagesSeen(userId, chatUserId).catch((err) => console.log(err));
     });
