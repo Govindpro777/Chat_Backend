@@ -1,6 +1,7 @@
 import { Server as SocketIOServer } from "socket.io";
 import Message from "./model/MessagesModel.js";
 import Channel from "./model/ChannelModel.js";
+import User from "./model/UserModel.js";
 import { sendPushToUser } from "./lib/push.js";
 
 const setupSocket = (server, app) => {
@@ -19,6 +20,130 @@ const setupSocket = (server, app) => {
   });
 
   const userSocketMap = new Map();
+
+  // ---- voice/video call signalling (the media itself flows peer to peer) ----
+  const RING_TIMEOUT = 50000;
+  const DISCONNECT_GRACE = 10000;
+  const activeCalls = new Map(); // callId -> { callId, caller, callee, type, state, timer }
+  const userCall = new Map(); // userId -> callId
+
+  const emitToUser = (userId, event, payload) => {
+    const socketId = userSocketMap.get(userId);
+    if (socketId) io.to(socketId).emit(event, payload);
+  };
+
+  // Ends a call and tells the other side (everyone except the user who ended it)
+  const endCallById = (callId, reason, exceptUserId) => {
+    const call = activeCalls.get(callId);
+    if (!call) return;
+    clearTimeout(call.timer);
+    activeCalls.delete(callId);
+    userCall.delete(call.caller);
+    userCall.delete(call.callee);
+    [call.caller, call.callee].forEach((id) => {
+      if (id !== exceptUserId) emitToUser(id, "call:ended", { callId, reason });
+    });
+  };
+
+  const getCallFor = (userId, callId) => {
+    const call = activeCalls.get(callId);
+    if (!call) return null;
+    return call.caller === userId || call.callee === userId ? call : null;
+  };
+
+  const otherParty = (call, userId) =>
+    call.caller === userId ? call.callee : call.caller;
+
+  const inviteToCall = async (userId, payload, ack) => {
+    const reply = (res) => typeof ack === "function" && ack(res);
+    const { to, callId, callType } = payload || {};
+    if (
+      !userId ||
+      typeof to !== "string" ||
+      typeof callId !== "string" ||
+      !["audio", "video"].includes(callType) ||
+      to === userId
+    ) {
+      return reply({ ok: false, reason: "failed" });
+    }
+    if (userCall.has(userId)) return reply({ ok: false, reason: "busy" });
+
+    const caller = await User.findById(userId).select(
+      "firstName lastName email image color"
+    );
+    if (!caller) return reply({ ok: false, reason: "failed" });
+
+    if (!userSocketMap.has(to)) {
+      // Not connected: a push notification is the best we can do
+      sendPushToUser(to, {
+        chatId: `call-${userId}`,
+        title: `Missed ${callType} call`,
+        body: senderName(caller),
+        url: `/chat/contact/${userId}`,
+        icon: caller.image,
+      }).catch(() => {});
+      return reply({ ok: false, reason: "unavailable" });
+    }
+    if (userCall.has(to)) return reply({ ok: false, reason: "busy" });
+
+    const call = {
+      callId,
+      caller: userId,
+      callee: to,
+      type: callType,
+      state: "ringing",
+      timer: setTimeout(() => endCallById(callId, "no-answer"), RING_TIMEOUT),
+    };
+    activeCalls.set(callId, call);
+    userCall.set(userId, callId);
+    userCall.set(to, callId);
+
+    emitToUser(to, "call:incoming", { callId, callType, from: caller });
+    sendPushToUser(to, {
+      chatId: `call-${userId}`,
+      title: `Incoming ${callType} call`,
+      body: senderName(caller),
+      url: `/chat/contact/${userId}`,
+      icon: caller.image,
+    }).catch(() => {});
+    reply({ ok: true });
+  };
+
+  const acceptCall = (userId, { callId } = {}) => {
+    const call = getCallFor(userId, callId);
+    if (!call || call.callee !== userId || call.state !== "ringing") return;
+    call.state = "accepted";
+    clearTimeout(call.timer);
+    emitToUser(call.caller, "call:accepted", { callId });
+  };
+
+  const rejectCall = (userId, { callId } = {}) => {
+    const call = getCallFor(userId, callId);
+    if (!call || call.callee !== userId) return;
+    endCallById(callId, "rejected", userId);
+  };
+
+  const relaySignal = (userId, { callId, data } = {}) => {
+    const call = getCallFor(userId, callId);
+    if (!call || !data || JSON.stringify(data).length > 20000) return;
+    emitToUser(otherParty(call, userId), "call:signal", { callId, data });
+  };
+
+  const endCall = (userId, { callId, reason } = {}) => {
+    const call = getCallFor(userId, callId);
+    if (!call) return;
+    endCallById(callId, typeof reason === "string" ? reason : "hangup", userId);
+  };
+
+  const relayMediaState = (userId, { callId, micOn, camOn } = {}) => {
+    const call = getCallFor(userId, callId);
+    if (!call) return;
+    emitToUser(otherParty(call, userId), "call:media-state", {
+      callId,
+      micOn: !!micOn,
+      camOn: !!camOn,
+    });
+  };
 
   // Lets HTTP controllers push socket events to specific users
   app?.set("notifyUsers", (userIds, event, payload) => {
@@ -256,6 +381,16 @@ const setupSocket = (server, app) => {
     for (const [userId, socketId] of userSocketMap.entries()) {
       if (socketId === socket.id) {
         userSocketMap.delete(userId);
+
+        // Give a flaky connection a moment to come back before dropping the call
+        const callId = userCall.get(userId);
+        if (callId) {
+          setTimeout(() => {
+            if (!userSocketMap.has(userId) && userCall.get(userId) === callId) {
+              endCallById(callId, "disconnected", userId);
+            }
+          }, DISCONNECT_GRACE);
+        }
         break;
       }
     }
@@ -294,6 +429,18 @@ const setupSocket = (server, app) => {
     socket.on("send-channel-message", (message, ack) =>
       sendChannelMessage(userId, message, ack)
     );
+
+    socket.on("call:invite", (payload, ack) => {
+      inviteToCall(userId, payload, ack).catch((err) => {
+        console.log("call invite failed", err.message);
+        if (typeof ack === "function") ack({ ok: false, reason: "failed" });
+      });
+    });
+    socket.on("call:accept", (payload) => acceptCall(userId, payload));
+    socket.on("call:reject", (payload) => rejectCall(userId, payload));
+    socket.on("call:signal", (payload) => relaySignal(userId, payload));
+    socket.on("call:media-state", (payload) => relayMediaState(userId, payload));
+    socket.on("call:end", (payload) => endCall(userId, payload));
 
     socket.on("react-message", (payload) => {
       reactToMessage(userId, payload).catch((err) =>
