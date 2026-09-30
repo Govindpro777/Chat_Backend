@@ -1,8 +1,12 @@
 import { Router } from "express";
 import {
   createChannel,
+  deleteChannel,
+  getChannelDetails,
   getChannelMessages,
   getUserChannels,
+  leaveChannel,
+  updateChannel,
 } from "../controllers/ChannelControllers.js";
 import { verifyToken } from "../middlewares/AuthMiddleware.js";
 
@@ -15,5 +19,10 @@ channelRoutes.get(
   verifyToken,
   getChannelMessages
 );
+
+channelRoutes.get("/details/:channelId", verifyToken, getChannelDetails);
+channelRoutes.put("/update/:channelId", verifyToken, updateChannel);
+channelRoutes.delete("/delete/:channelId", verifyToken, deleteChannel);
+channelRoutes.post("/leave/:channelId", verifyToken, leaveChannel);
 
 export default channelRoutes;
