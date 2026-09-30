@@ -1,6 +1,7 @@
 import { Server as SocketIOServer } from "socket.io";
 import Message from "./model/MessagesModel.js";
 import Channel from "./model/ChannelModel.js";
+import { sendPushToUser } from "./lib/push.js";
 
 const setupSocket = (server) => {
   const io = new SocketIOServer(server, {
@@ -30,6 +31,12 @@ const setupSocket = (server) => {
     }
   };
 
+  const senderName = (sender) =>
+    `${sender.firstName || sender.email} ${sender.lastName || ""}`.trim();
+
+  const pushBody = (message) =>
+    message.messageType === "file" ? "Sent a file" : message.content;
+
   const sendMessage = async (message) => {
     const recipientSocketId = userSocketMap.get(message.recipient);
     const senderSocketId = userSocketMap.get(message.sender);
@@ -51,6 +58,15 @@ const setupSocket = (server) => {
     if (senderSocketId) {
       io.to(senderSocketId).emit("receiveMessage", messageData);
     }
+
+    // Background/closed-app notification; failures must not affect delivery
+    sendPushToUser(messageData.recipient._id.toString(), {
+      chatId: messageData.sender._id.toString(),
+      title: senderName(messageData.sender),
+      body: pushBody(messageData),
+      url: `/chat/contact/${messageData.sender._id}`,
+      icon: messageData.sender.image,
+    }).catch((err) => console.log("Push error", err.message));
   };
 
   const sendChannelMessage = async (message) => {
@@ -90,6 +106,21 @@ const setupSocket = (server) => {
       if (adminSocketId) {
         io.to(adminSocketId).emit("recieve-channel-message", finalData);
       }
+
+      const senderId = messageData.sender._id.toString();
+      const recipientIds = new Set(
+        [...channel.members, channel.admin].map((u) => u._id.toString())
+      );
+      recipientIds.delete(senderId);
+      recipientIds.forEach((id) => {
+        sendPushToUser(id, {
+          chatId: channel._id.toString(),
+          title: `#${channel.name}`,
+          body: `${senderName(messageData.sender)}: ${pushBody(messageData)}`,
+          url: `/chat/channel/${channel._id}`,
+          icon: messageData.sender.image,
+        }).catch((err) => console.log("Push error", err.message));
+      });
     }
   };
 
